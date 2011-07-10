@@ -1,26 +1,73 @@
 /*
   pprint.c -- pretty print in sgml
-  
 */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "tidy.h"
 #include "pprint.h"
 #include "tidy-int.h"
+#include "tmbstr.h"
 #include "parser.h"
 #include "entities.h"
 #include "tmbstr.h"
 #include "utf8.h"
+#include "lexer.h"
 #include "main.h"
 
-void PPrintDocType( TidyDocImpl* doc, uint indent, Node *node )
+
+#if 0 /* [i_a] clashes with functions in lexer.obj(tidylib.lib) - when linking to static lib 'tidylib.lib */
+
+Bool TY_(IsDigit)(uint c)
+{
+	if (c < 0x100)
+		return (isdigit(c) ? yes : no);
+	return no;
+}
+
+uint TY_(ToLower)(uint c)
+{
+	if (c < 0x100)
+		c = toupper(c);
+
+    return c;
+}
+
+uint TY_(ToUpper)(uint c)
+{
+	if (c < 0x100)
+		c = tolower(c);
+
+    return c;
+}
+
+#endif
+
+
+uint tidyNodeGetModel(TidyNode node)
+{
+	Node* nimp = tidyNodeToImpl( node );
+	if (nimp && nimp->tag)
+		return nimp->tag->model;
+	return CM_UNKNOWN;
+}
+
+void tidyNodeSetType(TidyNode node, NodeType nt)
+{
+	Node* nimp = tidyNodeToImpl( node );
+	if (nimp)
+		nimp->type = nt;
+}
+
+
+void PPrintDocType( TidyDoc doc, uint indent, TidyNode node )
 {
     if(dbsgml)
-        PPrintString(doc, indent, "<!DOCTYPE article PUBLIC \"-//OASIS//DTD DocBook V4.1//EN\">\n");
+        tidyPPrintString(doc, indent, "<!DOCTYPE article PUBLIC \"-//OASIS//DTD DocBook V4.1//EN\">\n");
     else if(dbxml)
-        PPrintString(doc, indent, "<?xml version='1.0'?>\n<!DOCTYPE book PUBLIC \"-//OASIS//DTD DocBook XML V4.2//EN\">\n");
+        tidyPPrintString(doc, indent, "<?xml version='1.0'?>\n<!DOCTYPE book PUBLIC \"-//OASIS//DTD DocBook XML V4.2//EN\">\n");
 }
 
 void PrintSgmlDefault()
@@ -30,10 +77,10 @@ void PrintSgmlDefault()
     fprintf(stderr, str);
 }
 
-void PrintSgmlBodyStart(TidyDocImpl* doc, uint indent)
+void PrintSgmlBodyStart(TidyDoc doc, uint indent)
 {
     char *str = "<article>";
-    PPrintString(doc, indent, str);
+    tidyPPrintString(doc, indent, str);
 }
 
 #define DIGIT(c) (c - 48)
@@ -44,9 +91,10 @@ static Bool seen_h[TOTAL_H] = {no, no, no, no, no, no};
 #define SECT(i) (i - startsect)
 static int startsect = 0; /* We are at level 0(H1) initially */
 
-void PrintSgmlBodyEnd(TidyDocImpl *doc, uint indent)
-{   int i = TOTAL_H - 1;
-    char str[10];
+void PrintSgmlBodyEnd(TidyDoc doc, uint indent)
+{   
+	int i = TOTAL_H - 1;
+    char str[30];
 
     while(i >= 0) {
         if(seen_h[i] == yes) {
@@ -54,75 +102,76 @@ void PrintSgmlBodyEnd(TidyDocImpl *doc, uint indent)
                 sprintf(str, "</simplesect>");
             else
                 sprintf(str, "</sect%d>", SECT(i) + 1);
-            PPrintString(doc, indent, str);
+            tidyPPrintString(doc, indent, str);
             seen_h[i] = no;
         }
         --i;
     }
     
     sprintf(str, "</article>");
-    PPrintString(doc, indent, str);
+    tidyPPrintString(doc, indent, str);
 }
 
-char *GetContent(Lexer *lexer, Node *node)
-{   Node *content, *temp_node;
-    char *str, *temp;
+TidyBuffer *GetContent(TidyDoc doc, TidyNode node)
+{   
+	TidyNode content;
+	TidyNode temp_node;
+	char *temp;
     Bool flag = no;
     int i;
+	TidyBuffer *buf = tidyBufCreate(NULL);
+	tidyBufCheckAlloc(buf, 256, 0);
 
-    content = node->content;
+    content = tidyGetChild(node);
 
     /* Find the <a> tag */
     for (temp_node = content;
-         temp_node && !nodeIsA(temp_node); 
-         temp_node = temp_node->next)
+         temp_node && !tidyNodeIsA(temp_node); 
+         temp_node = tidyGetNext(temp_node))
          ;
     
     if(temp_node == NULL) { /* There is no <a> .. </a> tag */
         /* Discard all elements which are not text nodes */
         temp_node = content;
         for (temp_node = content;
-             temp_node && temp_node->type != TextNode; 
-             temp_node = temp_node->next)
+             temp_node && tidyNodeGetType(temp_node) != TidyNode_Text; 
+             temp_node = tidyGetNext(temp_node))
            ;
         if(temp_node == NULL) { /* There's no TextNode either */ 
-            str = MemAlloc(1);
-            str[0] = '\0';
-            return str;
+			buf->bp[0] = 0;
+            return buf;
         }
     }
     content = temp_node;
 
-    if(content->type == TextNode)  {
-        int size = content->end - content->start;
-        
-        str = MemAlloc(size + 1);
-        str[size] = '\0';
-        tmbstrncpy(str, lexer->lexbuf + content->start, size);
+    if(tidyNodeGetType(content) == TextNode)  {
+		tidyNodeGetText(doc, content, buf);
     }
-    else if(nodeIsA(content)){
-        AttVal *name;
+    else if(tidyNodeIsA(content)){
+        TidyAttr name;
         int size;
 
-        name = GetAttrByName(content, "name");
+        name = tidyGetAttrByName(content, "name");
         if(name == NULL)
-            name = GetAttrByName(content, "href");
+            name = tidyGetAttrByName(content, "href");
 
         if(name == NULL) {  /* No href or name, let's take empty id */
-            size = 0;
-            str = MemAlloc(size + 1);
-            str[size] = '\0';
+			buf->bp[0] = 0;
+			return buf;
         }
         else {
-            size = tmbstrlen(name->value);
-            str = MemAlloc(size + 1);
-            str[size] = '\0';
-            tmbstrncpy(str, name->value, size);
+			ctmbstr v = tidyAttrValue(name);
+            size = TY_(tmbstrlen)(v);
+			tidyBufAppend(buf, v, size);
        }
     }
 
-    temp = str;
-    if(str[0] == '#')
+	/* enforce NUL termination in buf: */
+	assert(buf->size < buf->allocated);
+	buf->bp[buf->size] = 0;
+
+    temp = buf->bp;
+    if(temp[0] == '#')
         flag = yes;
 
 #define SGML_NAMELEN 44  /* Maximum id namelength */
@@ -138,6 +187,7 @@ char *GetContent(Lexer *lexer, Node *node)
             *temp = '_';
     }
     *temp = '\0';
+	buf->size = temp - buf->bp;
 
     /* This might create problem with linkends */
 #if 0
@@ -145,86 +195,90 @@ char *GetContent(Lexer *lexer, Node *node)
     if(str[0] = '_')
         str[0] = 'a';
 #endif
-    return str;
+    return buf;
 }
 
-void PrintSectTag( TidyDocImpl *doc, uint indent, Node *node, uint startsect)
-{   char sectnum = node->element[1];
-    char str[100];
+void PrintSectTag( TidyDoc doc, uint indent, TidyNode node, uint startsect)
+{   
+	char sectnum = tidyNodeGetName(node)[1];
+    char str[500];
 
-    char *id = GetContent(doc->lexer, node);
+    TidyBuffer *id = GetContent(doc, node);
+	assert(TY_(tmbstrlen)(id->bp) < id->allocated);
 
     if(sectnum == '6')  /* there's no sect6. We can do variety of
                            things here. may be <section> .. */
-        sprintf(str, "<simplesect id=\"%s\"><title>", id); 
+        sprintf(str, "<simplesect id=\"%s\"><title>", id->bp); 
     else 
-        sprintf(str, "<sect%c id=\"%s\"><title>", SECT(sectnum), id); 
-    PPrintString(doc, indent, str);
-    MemFree(id);
+        sprintf(str, "<sect%c id=\"%s\"><title>", SECT(sectnum), id->bp); 
+    tidyPPrintString(doc, indent, str);
+	tidyBufFree(id);
 }
 
-Bool ImmediateDescendantOfHTags(Node *element)
-{   Node *parent = element->parent;
+Bool ImmediateDescendantOfHTags(TidyNode element)
+{   
+	TidyNode parent = tidyGetParent(element);
 
-    if (strlen(parent->element) == 2 && 
-            parent->element[0] == 'h' && 
-            IsDigit(parent->element[1]))
+    if (strlen(tidyNodeGetName(parent)) == 2 && 
+            tidyNodeGetName(parent)[0] == 'h' && 
+            TY_(IsDigit)(tidyNodeGetName(parent)[1]))
         return yes;
     return no;
 }
-void PrintSgmlLink(TidyDocImpl *doc, uint indent, Node *node)
-{   AttVal *addr;
-    char str[500];  /* FIXME allocate dynamically later */
+void PrintSgmlLink(TidyDoc doc, uint indent, TidyNode node)
+{   TidyAttr addr;
+    char str[500];  /* FIXME: allocate dynamically later */
 
-    addr = GetAttrByName(node, "name");
+    addr = tidyGetAttrByName(node, "name");
     if(addr == NULL) {
-        addr = GetAttrByName(node, "href");
+        addr = tidyGetAttrByName(node, "href");
         if(!ImmediateDescendantOfHTags(node)) {
-            if(addr->value[0] == '#') 
-                sprintf(str, "<link linkend=\"%s\">", addr->value + 1); 
+            if(tidyAttrValue(addr)[0] == '#') 
+                sprintf(str, "<link linkend=\"%s\">", tidyAttrValue(addr) + 1); 
             else
-                sprintf(str, "<ulink url=\"%s\">", addr->value); 
-            if( !DescendantOf(node, TidyTag_P) && 
+                sprintf(str, "<ulink url=\"%s\">", tidyAttrValue(addr)); 
+            if( !tidyDescendantOf(node, TidyTag_P) && 
                 /* <programlisting> doesn't allow <para> */
-                !DescendantOf(node, TidyTag_PRE) &&
-                 node->prev && node->prev->type == TextNode)
-                PPrintString(doc, indent, "<para>");
-            PPrintString(doc, indent, str);
+                !tidyDescendantOf(node, TidyTag_PRE) &&
+                 tidyGetPrev(node) && tidyNodeGetType(tidyGetPrev(node)) == TextNode)
+                tidyPPrintString(doc, indent, "<para>");
+            tidyPPrintString(doc, indent, str);
         }
     }
     else {
         if(!ImmediateDescendantOfHTags(node)) {
-            if(!DescendantOf(node, TidyTag_P)) 
-                sprintf(str, "<para id=\"%s\">", addr->value); 
+            if(!tidyDescendantOf(node, TidyTag_P)) 
+                sprintf(str, "<para id=\"%s\">", tidyAttrValue(addr)); 
             else /* We cannnot have a <para> inside another <para> */
-                sprintf(str, "<anchor id=\"%s\"/>", addr->value); 
-            PPrintString(doc, indent, str);
+                sprintf(str, "<anchor id=\"%s\"/>", tidyAttrValue(addr)); 
+            tidyPPrintString(doc, indent, str);
         }
     }
 }
 
-void PrintSgmlLinkEnd(TidyDocImpl *doc, uint indent, Node *node)
-{   AttVal *addr;
+void PrintSgmlLinkEnd(TidyDoc doc, uint indent, TidyNode node)
+{   
+	TidyAttr addr;
 
-    addr = GetAttrByName(node, "name");
+    addr = tidyGetAttrByName(node, "name");
     if(addr == NULL) {
-        addr = GetAttrByName(node, "href");
+        addr = tidyGetAttrByName(node, "href");
         if(!ImmediateDescendantOfHTags(node)) {
-            if(addr->value[0] == '#') 
-                PPrintString(doc, indent, "</link>");
+            if(tidyAttrValue(addr)[0] == '#') 
+                tidyPPrintString(doc, indent, "</link>");
             else
-                PPrintString(doc, indent, "</ulink>");
-            if( !DescendantOf(node, TidyTag_P) && 
+                tidyPPrintString(doc, indent, "</ulink>");
+            if( !tidyDescendantOf(node, TidyTag_P) && 
                  /* <programlisting> doesn't allow <para> */
-                !DescendantOf(node, TidyTag_PRE) &&
-                 node->prev && node->prev->type == TextNode)
-                PPrintString(doc, indent, "</para>");
+                !tidyDescendantOf(node, TidyTag_PRE) &&
+                 tidyGetPrev(node) && tidyNodeGetType(tidyGetPrev(node)) == TextNode)
+                tidyPPrintString(doc, indent, "</para>");
         }
     }
     else {
         if(!ImmediateDescendantOfHTags(node)) {
-            if(!DescendantOf(node, TidyTag_P))
-                PPrintString(doc, indent, "</para>");
+            if(!tidyDescendantOf(node, TidyTag_P))
+                tidyPPrintString(doc, indent, "</para>");
             /* else
                <anchor ..  /> has already been placed. no need to
                do any thing */
@@ -233,223 +287,226 @@ void PrintSgmlLinkEnd(TidyDocImpl *doc, uint indent, Node *node)
 }
 
 
-void PrintSgmlTagString(TidyDocImpl *doc, uint mode, uint indent, 
+void PrintSgmlTagString(TidyDoc doc, uint mode, uint indent, 
                         SgmlTagType sgmltag_type, char *str)
-{   PPrintChar(doc, str[0], mode | CDATA);
+{   tidyPPrintChar(doc, str[0], mode | TidyTextFormat_CDATA);
     if(sgmltag_type == SgmlTagEnd)
-        PPrintChar(doc, '/', mode);
-    PPrintString(doc, indent, str + 1);
+        tidyPPrintChar(doc, '/', mode);
+    tidyPPrintString(doc, indent, str + 1);
 }
 
-void PrintSgmlList(TidyDocImpl *doc, uint indent, uint mode, Node *node)
-{   if(nodeIsUL(node))
-        PPrintString(doc, indent, "<itemizedlist>");
-    else if(nodeIsOL(node))
-        PPrintString(doc, indent, "<orderedlist>");
-    else if(nodeIsDL(node))
-        PPrintString(doc, indent, "<variablelist>");
+void PrintSgmlList(TidyDoc doc, uint indent, uint mode, TidyNode node)
+{   if(tidyNodeIsUL(node))
+        tidyPPrintString(doc, indent, "<itemizedlist>");
+    else if(tidyNodeIsOL(node))
+        tidyPPrintString(doc, indent, "<orderedlist>");
+    else if(tidyNodeIsDL(node))
+        tidyPPrintString(doc, indent, "<variablelist>");
 }
 
-void PrintSgmlListEnd(TidyDocImpl *doc, uint indent, uint mode, Node *node)
-{   if(nodeIsUL(node))
-        PPrintString(doc, indent, "</itemizedlist>");
-    else if(nodeIsUL(node))
-        PPrintString(doc, indent, "</orderedlist>");
-    else if(nodeIsDL(node))
-        PPrintString(doc, indent, "</variablelist>");
+void PrintSgmlListEnd(TidyDoc doc, uint indent, uint mode, TidyNode node)
+{   if(tidyNodeIsUL(node))
+        tidyPPrintString(doc, indent, "</itemizedlist>");
+    else if(tidyNodeIsUL(node))
+        tidyPPrintString(doc, indent, "</orderedlist>");
+    else if(tidyNodeIsDL(node))
+        tidyPPrintString(doc, indent, "</variablelist>");
 }
 
-void PrintSgmlListItem(TidyDocImpl *doc, uint indent, Node *node)
-{   if(nodeIsLI(node))
-        PPrintString(doc, indent, "<listitem>");
-    else if(nodeIsDD(node))
-        PPrintString(doc, indent, "<listitem>");
+void PrintSgmlListItem(TidyDoc doc, uint indent, TidyNode node)
+{   if(tidyNodeIsLI(node))
+        tidyPPrintString(doc, indent, "<listitem>");
+    else if(tidyNodeIsDD(node))
+        tidyPPrintString(doc, indent, "<listitem>");
 }
 
-void PrintSgmlListItemEnd(TidyDocImpl *doc, uint indent, Node *node)
-{   if(nodeIsLI(node))
-        PPrintString(doc, indent, "</listitem>");
-    else if(nodeIsDD(node))
-        PPrintString(doc, indent, "</listitem></varlistentry>");
+void PrintSgmlListItemEnd(TidyDoc doc, uint indent, TidyNode node)
+{   if(tidyNodeIsLI(node))
+        tidyPPrintString(doc, indent, "</listitem>");
+    else if(tidyNodeIsDD(node))
+        tidyPPrintString(doc, indent, "</listitem></varlistentry>");
 }
 
-void PrintSgmlImage(TidyDocImpl *doc, uint indent, Node *node)
-{   AttVal *addr;
-    char str[100];
+void PrintSgmlImage(TidyDoc doc, uint indent, TidyNode node)
+{   TidyAttr addr;
+    char str[500];
 
-    addr = GetAttrByName(node, "src");
+    addr = tidyGetAttrByName(node, "src");
     /* We can get other attributes like width, height etc.. */
     if(addr != NULL) {
-        PPrintString(doc, indent, "<inlinemediaobject><imageobject>");
-        PCondFlushLine(doc, indent);
-        sprintf(str, "<imagedata fileref=\"%s\">", addr->value); 
-        PPrintString(doc, indent, str);
-        PCondFlushLine(doc, indent);
-        PPrintString(doc, indent, "</imageobject></inlinemediaobject>");
-        PCondFlushLine(doc, indent);
+        tidyPPrintString(doc, indent, "<inlinemediaobject><imageobject>");
+        tidyPCondFlushLine(doc, indent);
+        sprintf(str, "<imagedata fileref=\"%s\">", tidyAttrValue(addr)); 
+        tidyPPrintString(doc, indent, str);
+        tidyPCondFlushLine(doc, indent);
+        tidyPPrintString(doc, indent, "</imageobject></inlinemediaobject>");
+        tidyPCondFlushLine(doc, indent);
     }
 }
 
-int CountColumns(Node *node)
-{   Node *temp, *row_content;
+int CountColumns(TidyNode node)
+{
+	TidyNode temp;
+	TidyNode row_content;
     int ncols = 0;
 
-    temp = node->content;
+    temp = tidyGetChild(node);
 
-    /* FIXME */
+    /* FIXME: */
     /* Perhaps this is not needed, check with HTML standard later */
     /*
-    while(nodeIsTR(temp))
+    while(tidyNodeIsTR(temp))
         temp = temp->next;
     */
     /* This can contain th or td's */
-    row_content = temp->content;
+    row_content = tidyGetChild(temp);
     while(row_content) {
-        if(nodeIsTH(row_content) || nodeIsTD(row_content)) {
-            AttVal *colspan;
+        if(tidyNodeIsTH(row_content) || tidyNodeIsTD(row_content)) {
+            TidyAttr colspan;
             
-            colspan = GetAttrByName(row_content, "colspan");
+            colspan = tidyGetAttrByName(row_content, "colspan");
             if(colspan)
-                ncols += atoi(colspan->value);
+                ncols += atoi(tidyAttrValue(colspan));
             else
                 ++ncols;
         }
         else
             fprintf(stderr, "PrintSgml: error in table processing\n");
-        row_content = row_content->next;
+        row_content = tidyGetNext(row_content);
    } 
    return ncols;
 }
 
-void PrintSgmlTable(TidyDocImpl *doc, uint indent, Node *node)
+void PrintSgmlTable(TidyDoc doc, uint indent, TidyNode node)
 {   int ncols;
-    char str[100];
+    char str[500];
 
-    PPrintString(doc, indent, "<informaltable>");
+    tidyPPrintString(doc, indent, "<informaltable>");
     ncols = CountColumns(node);
     sprintf(str, "<tgroup cols=\"%d\"><tbody>", ncols);
-    PPrintString(doc, indent, str);
+    tidyPPrintString(doc, indent, str);
 }
 
-void PrintSgmlTableEnd(TidyDocImpl *doc, uint indent, Node *node)
+void PrintSgmlTableEnd(TidyDoc doc, uint indent, TidyNode node)
 {   
-    PPrintString(doc, indent, "</tbody></tgroup></informaltable>");
+    tidyPPrintString(doc, indent, "</tbody></tgroup></informaltable>");
 }
 
-Bool DescendantOfAddress(Node *element)
+Bool DescendantOfAddress(TidyNode element)
 {
-    Node *parent;
+    TidyNode parent;
     
-    for (parent = element->parent;
-            parent != null; parent = parent->parent)
-    {   if (parent->element && tmbstrcasecmp(parent->element, "address") == 0)
+    for (parent = tidyGetParent(element);
+            parent != NULL; parent = tidyGetParent(parent))
+    {   if (tidyNodeGetName(parent) && TY_(tmbstrcasecmp)(tidyNodeGetName(parent), "address") == 0)
             return yes;
     }
 
     return no;
 }
 
-void PrintSgmlTag( TidyDocImpl *doc, uint mode, uint indent, Node *node,
+void PrintSgmlTag( TidyDoc doc, uint mode, uint indent, TidyNode node,
                     SgmlTagType sgmltag_type)
 {   static int level = -1;
 
-    if(nodeIsHTML(node)) {
+    if(tidyNodeIsHTML(node)) {
         if(sgmltag_type == SgmlTagStart)
             PrintSgmlBodyStart(doc, indent);
         else if(sgmltag_type == SgmlTagEnd)
             PrintSgmlBodyEnd(doc, indent);
     }
-    else if(nodeIsHEAD(node))
+    else if(tidyNodeIsHEAD(node))
         PrintSgmlTagString(doc, mode, indent, sgmltag_type, "<articleinfo>");
-    else if(nodeIsTITLE(node))
+    else if(tidyNodeIsTITLE(node))
         PrintSgmlTagString(doc, mode, indent, sgmltag_type, "<title>");
     /* May be we can replace with node->model & CM_LIST */
-    else if(nodeIsUL(node) || nodeIsOL(node)|| nodeIsDL(node)) {
+    else if(tidyNodeIsUL(node) || tidyNodeIsOL(node)|| tidyNodeIsDL(node)) {
         if(sgmltag_type == SgmlTagStart)
             PrintSgmlList(doc, indent, mode, node);
         else if(sgmltag_type == SgmlTagEnd)
             PrintSgmlListEnd(doc, indent, mode, node);
     }
-    else if(nodeIsDT(node)) {
+    else if(tidyNodeIsDT(node)) {
         if(sgmltag_type == SgmlTagStart)
-            PPrintString(doc, indent, "<varlistentry><term>");
+            tidyPPrintString(doc, indent, "<varlistentry><term>");
         else if(sgmltag_type == SgmlTagEnd)
-            PPrintString(doc, indent, "</term>");
+            tidyPPrintString(doc, indent, "</term>");
     }
-    else if(nodeIsLI(node) || nodeIsDD(node)) {
+    else if(tidyNodeIsLI(node) || tidyNodeIsDD(node)) {
         if(sgmltag_type == SgmlTagStart)
             PrintSgmlListItem(doc, indent, node);
         else if(sgmltag_type == SgmlTagEnd)
             PrintSgmlListItemEnd(doc, indent, node);
     }
     /* Later we should clean this before coming to PrintSgml */
-    else if(nodeIsP(node) && 
+    else if(tidyNodeIsP(node) && 
             /* Table <entry> processing */
-            !DescendantOf(node, TidyTag_TH) && !DescendantOf(node, TidyTag_TD) && 
+            !tidyDescendantOf(node, TidyTag_TH) && !tidyDescendantOf(node, TidyTag_TD) && 
             !DescendantOfAddress(node) && 
             /* <programlisting> doesn't allow <para> */
-            !DescendantOf(node, TidyTag_PRE)) 
+            !tidyDescendantOf(node, TidyTag_PRE)) 
         PrintSgmlTagString(doc, mode, indent, sgmltag_type, "<para>");
-    else if(nodeIsBLOCKQUOTE(node))
+    else if(tidyNodeIsBLOCKQUOTE(node))
         PrintSgmlTagString(doc, mode, indent, sgmltag_type, "<blockquote>");
-    else if(nodeIsPRE(node) && 
+    else if(tidyNodeIsPRE(node) && 
             /* Table <entry> processing */
-            !DescendantOf(node, TidyTag_TH) && !DescendantOf(node, TidyTag_TD))
+            !tidyDescendantOf(node, TidyTag_TH) && !tidyDescendantOf(node, TidyTag_TD))
         PrintSgmlTagString(doc, mode, indent, sgmltag_type, 
                                "<programlisting>");
-    else if(nodeIsA(node)) {
+    else if(tidyNodeIsA(node)) {
         if(sgmltag_type == SgmlTagStart)
             PrintSgmlLink(doc, indent, node);
         else if(sgmltag_type == SgmlTagEnd)
             PrintSgmlLinkEnd(doc, indent, node);
     }
     /* Table would require more processing */
-    else if(nodeIsTABLE(node)) {
+    else if(tidyNodeIsTABLE(node)) {
         if(sgmltag_type == SgmlTagStart)
             PrintSgmlTable(doc, indent, node);
         else if(sgmltag_type == SgmlTagEnd)
             PrintSgmlTableEnd(doc, indent, node);
     }
-    else if(nodeIsTR(node))
+    else if(tidyNodeIsTR(node))
         PrintSgmlTagString(doc, mode, indent, sgmltag_type, "<row>");
-    else if(nodeIsTD(node) || nodeIsTH(node))
+    else if(tidyNodeIsTD(node) || tidyNodeIsTH(node))
         PrintSgmlTagString(doc, mode, indent, sgmltag_type, "<entry>");
-    else if(nodeIsIMG(node)) { /* This is a StartEndTag */
+    else if(tidyNodeIsIMG(node)) { /* This is a StartEndTag */
         if(sgmltag_type == SgmlTagStart)    
             PrintSgmlImage(doc, indent, node);
     }
 
-    else if(tmbstrcasecmp(node->element, "cite") == 0)
+    else if(TY_(tmbstrcasecmp)(tidyNodeGetName(node), "cite") == 0)
         PrintSgmlTagString(doc, mode, indent, sgmltag_type, 
                                 "<citation>");
     /* We should distinguish tag_strong and tag_em later 
        haven't found proper docbook tag for <strong> */
-    else if(nodeIsEM(node) || nodeIsSTRONG(node) ||
-            tmbstrcasecmp(node->element, "address") == 0) {
+    else if(tidyNodeIsEM(node) || tidyNodeIsSTRONG(node) ||
+            TY_(tmbstrcasecmp)(tidyNodeGetName(node), "address") == 0) {
         if(sgmltag_type == SgmlTagStart) {
-            if(DescendantOf(node, TidyTag_P) || DescendantOf(node, TidyTag_PRE))
-                PPrintString(doc, indent, "<emphasis>");
+            if(tidyDescendantOf(node, TidyTag_P) || tidyDescendantOf(node, TidyTag_PRE))
+                tidyPPrintString(doc, indent, "<emphasis>");
             else
-                PPrintString(doc, indent, "<para><emphasis>");
+                tidyPPrintString(doc, indent, "<para><emphasis>");
         }
         else if(sgmltag_type == SgmlTagEnd) {
-            if(DescendantOf(node, TidyTag_P) || DescendantOf(node, TidyTag_PRE))
-                PPrintString(doc, indent, "</emphasis>");
+            if(tidyDescendantOf(node, TidyTag_P) || tidyDescendantOf(node, TidyTag_PRE))
+                tidyPPrintString(doc, indent, "</emphasis>");
             else 
-                PPrintString(doc, indent, "</emphasis></para>");
+                tidyPPrintString(doc, indent, "</emphasis></para>");
         }
     }
     else {
-        if(tmbstrcasecmp(node->element, "code") == 0 &&
-            !(nodeIsDD(node->parent) || nodeIsLI(node->parent)))
+        if(TY_(tmbstrcasecmp)(tidyNodeGetName(node), "code") == 0 &&
+            !(tidyNodeIsDD(tidyGetParent(node)) || tidyNodeIsLI(tidyGetParent(node))))
                 PrintSgmlTagString(doc, mode, indent, 
                                 sgmltag_type, "<literal>");
-        else if(strlen(node->element) == 2 && 
-                node->element[0] == 'h' && 
-                IsDigit(node->element[1])) {
+        else if(strlen(tidyNodeGetName(node)) == 2 && 
+                tidyNodeGetName(node)[0] == 'h' && 
+                TY_(IsDigit)(tidyNodeGetName(node)[1])) {
             if(sgmltag_type == SgmlTagStart) {        
-                int sectnum = DIGIT(node->element[1]) - 1;
-                char str[10];
+                int sectnum = DIGIT(tidyNodeGetName(node)[1]) - 1;
+                char str[30];
+
                 if(seen_h[sectnum] == no)
                     seen_h[sectnum] = yes;
                 else {
@@ -459,7 +516,7 @@ void PrintSgmlTag( TidyDocImpl *doc, uint mode, uint indent, Node *node,
                             sprintf(str, "</simplesect>");
                         else
                             sprintf(str, "</sect%d>", SECT(i) + 1);
-                        PPrintString(doc, indent, str);
+                        tidyPPrintString(doc, indent, str);
                         seen_h[i] = no;
                         --i;
                     }
@@ -467,7 +524,7 @@ void PrintSgmlTag( TidyDocImpl *doc, uint mode, uint indent, Node *node,
                         sprintf(str, "</simplesect>");
                     else
                         sprintf(str, "</sect%d>", SECT(sectnum) + 1);
-                    PPrintString(doc, indent, str);
+                    tidyPPrintString(doc, indent, str);
                 }
                 /* H1 is not the first level 
                    like the curses man2html pages */
@@ -478,186 +535,207 @@ void PrintSgmlTag( TidyDocImpl *doc, uint mode, uint indent, Node *node,
                 level = sectnum;
             }
             else
-                PPrintString(doc, indent, "</title>");
+                tidyPPrintString(doc, indent, "</title>");
         }
     }
 }
 
-void PrintSgml( TidyDocImpl* doc, uint mode, uint indent, Node *node )
-{   Node *content;
-    Bool xhtml = cfgBool( doc, TidyXhtmlOut);
-    uint spaces = cfg( doc, TidyIndentSpaces );
+void PrintSgml( TidyDoc doc, uint mode, uint indent, TidyNode node )
+{   
+	TidyNode content;
+    Bool xhtml = tidyOptGetBool( doc, TidyXhtmlOut );
+    uint spaces = tidyOptGetInt( doc, TidyIndentSpaces );
 
-    if (node == null)
+    if (node == NULL)
         return;
     
-    if (node->type == TextNode) {
-        if(DescendantOf(node, TidyTag_DD) && !DescendantOf(node, TidyTag_A) &&
-            !DescendantOf(node, TidyTag_P) && 
-            /* We have to descide on this table stuff later
+    if (tidyNodeGetType(node) == TextNode) {
+        if(tidyDescendantOf(node, TidyTag_DD) && !tidyDescendantOf(node, TidyTag_A) &&
+            !tidyDescendantOf(node, TidyTag_P) && 
+            /* We have to decide on this table stuff later
              * <entry> processing is complex */
-            !DescendantOf(node, TidyTag_TD) && !DescendantOf(node, TidyTag_TH) &&
+            !tidyDescendantOf(node, TidyTag_TD) && !tidyDescendantOf(node, TidyTag_TH) &&
             /* <programlisting> doesn't allow <para> */
-            !DescendantOf(node, TidyTag_PRE)    
+            !tidyDescendantOf(node, TidyTag_PRE)    
             ) 
-        /*  && wstrcasecmp(node->parent->element, "code") != 0)
+        /*  && wstrcasecmp(tidyGetParent(node)->element, "code") != 0)
          above line may be needed later to properly convert <code> stuff */
         {
-            PPrintString(doc, indent, "<para>");
-            PPrintText(doc, mode, indent, node);
-            PPrintString(doc, indent, "</para>");
+            tidyPPrintString(doc, indent, "<para>");
+            tidyPPrintText(doc, mode, indent, node);
+            tidyPPrintString(doc, indent, "</para>");
         }
         else {
-            if(DescendantOf(node, TidyTag_STYLE))
+            if(tidyDescendantOf(node, TidyTag_STYLE))
                 fprintf(stderr, "PrintSgml: skipping style elements\n\n");
             else
-                PPrintText(doc, mode, indent, node);
+                tidyPPrintText(doc, mode, indent, node);
         }
     }
-    else if(node->type == CDATATag && TidyEscapeCdata)
-        PPrintText(doc, mode, indent, node);
-    else if (node->type == CommentTag)
-        PPrintComment(doc, indent, node);
-    else if (node->type == RootNode)
+    else if(tidyNodeGetType(node) == CDATATag && TidyEscapeCdata)
+        tidyPPrintText(doc, mode, indent, node);
+    else if (tidyNodeGetType(node) == CommentTag)
+        tidyPPrintComment(doc, indent, node);
+    else if (tidyNodeGetType(node) == RootNode)
     {
-        for (content = node->content;
-                content != null;
-                content = content->next)
+        for (content = tidyGetChild(node);
+                content != NULL;
+                content = tidyGetNext(content))
+		{
            PrintSgml(doc, mode, indent, content);
+		}
     }
-    else if (node->type == DocTypeTag)
+    else if (tidyNodeGetType(node) == DocTypeTag)
         PPrintDocType(doc, indent, node);
-    else if (node->type == CDATATag)
-        PPrintCDATA(doc, indent, node);
-    else if (node->type == SectionTag)
-        PPrintSection(doc, indent, node);
-    else if (node->type == AspTag || 
-             node->type == JsteTag ||
-             node->type == PhpTag )
+    else if (tidyNodeGetType(node) == CDATATag)
+        tidyPPrintCDATA(doc, indent, node);
+    else if (tidyNodeGetType(node) == SectionTag)
+        tidyPPrintSection(doc, indent, node);
+    else if (tidyNodeGetType(node) == AspTag || 
+             tidyNodeGetType(node) == JsteTag ||
+             tidyNodeGetType(node) == PhpTag )
         PrintSgmlDefault();
-    else if (node->type == ProcInsTag)
-        PPrintPI(doc, indent, node);
-    else if (node->type == XmlDecl)// && DbXml May be this is needed
-        PPrintXmlDecl(doc, indent, node);
-    else if (node->tag->model & CM_EMPTY || 
-            (node->type == StartEndTag && !xhtml))
+    else if (tidyNodeGetType(node) == ProcInsTag)
+        tidyPPrintPI(doc, indent, node);
+    else if (tidyNodeGetType(node) == XmlDecl)// && DbXml May be this is needed
+        tidyPPrintXmlDecl(doc, indent, node);
+    else if (tidyNodeGetModel(node) & CM_EMPTY || 
+            (tidyNodeGetType(node) == StartEndTag && !xhtml))
     {
-        if (!(node->tag->model & CM_INLINE))
-            PCondFlushLine(doc, indent);
+        if (!(tidyNodeGetModel(node) & CM_INLINE))
+            tidyPCondFlushLine(doc, indent);
 
-        if ( cfgBool(doc, TidyMakeClean) && nodeIsWBR(node) )
-            PPrintString(doc, indent, " ");
+        if ( tidyOptGetBool(doc, TidyMakeClean) && tidyNodeIsWBR(node) )
+            tidyPPrintString(doc, indent, " ");
         else
             PrintSgmlTag(doc, mode, indent, node, SgmlTagStart);
     }
     else {
-        if (node->type == StartEndTag)
-            node->type = StartTag;
+        if (tidyNodeGetType(node) == StartEndTag)
+            tidyNodeSetType(node, StartTag);
         
-        if (node->tag && node->tag->parser == ParsePre)
+		if (tidyNodeGetId(node) == TidyTag_PRE /* tag->parser == TY_(ParsePre) */ 
+			|| tidyNodeGetId(node) == TidyTag_LISTING 
+			|| tidyNodeGetId(node) == TidyTag_PLAINTEXT 
+			|| tidyNodeGetId(node) == TidyTag_XMP
+			)
         {
-            PCondFlushLine(doc, indent);
+            tidyPCondFlushLine(doc, indent);
 
             indent = 0;
-            PCondFlushLine(doc, indent);
+            tidyPCondFlushLine(doc, indent);
 
             PrintSgmlTag(doc, mode, indent, node, SgmlTagStart);
-            PFlushLine(doc, indent);
+            tidyPFlushLine(doc, indent);
 
-            for (content = node->content;
-                    content != null;
-                    content = content->next)
-                PrintSgml(doc, (mode | PREFORMATTED | NOWRAP), 
+            for (content = tidyGetChild(node);
+                    content != NULL;
+                    content = tidyGetNext(content))
+			{
+                PrintSgml(doc, (mode | TidyTextFormat_Preformatted | TidyTextFormat_NoWrap), 
                             indent, content);
-            
-            PCondFlushLine(doc, indent);
-            PrintSgmlTag(doc, mode, indent, node, SgmlTagEnd);
-            PFlushLine(doc, indent);
+			}
 
-            if ( !cfg(doc, TidyIndentContent) && node->next != null )
-                PFlushLine(doc, indent);
+            tidyPCondFlushLine(doc, indent);
+            PrintSgmlTag(doc, mode, indent, node, SgmlTagEnd);
+            tidyPFlushLine(doc, indent);
+
+            if ( !tidyOptGetBool(doc, TidyIndentContent) && tidyGetNext(node) != NULL )
+                tidyPFlushLine(doc, indent);
         }
-        else if (node->tag->model & CM_INLINE)
+        else if (tidyNodeGetModel(node) & CM_INLINE)
         {   PrintSgmlTag(doc, mode, indent, node, SgmlTagStart);
 
-            if (ShouldIndent(doc, node))
+            if (tidyShouldIndent(doc, node))
             {
-                PCondFlushLine(doc, indent);
+                tidyPCondFlushLine(doc, indent);
                 indent += spaces;
 
-                for (content = node->content;
-                        content != null;
-                        content = content->next)
+                for (content = tidyGetChild(node);
+                        content != NULL;
+                        content = tidyGetNext(content))
+				{
                     PrintSgml(doc, mode, indent, content);
+				}
 
-                PCondFlushLine(doc, indent);
+                tidyPCondFlushLine(doc, indent);
                 indent -= spaces;
-                PCondFlushLine(doc, indent);
+                tidyPCondFlushLine(doc, indent);
             }
             else
             {
-
-                for (content = node->content;
-                        content != null;
-                        content = content->next)
+	            for (content = tidyGetChild(node);
+                        content != NULL;
+                        content = tidyGetNext(content))
+				{
                     PrintSgml(doc, mode, indent, content);
+				}
             }
 
             PrintSgmlTag(doc, mode, indent, node, SgmlTagEnd);
         }
         else 
-        {   PCondFlushLine(doc, indent);
-/*            if (TidySmartIndent && node->prev != null)
-                PFlushLine(doc, indent);
+        {   tidyPCondFlushLine(doc, indent);
+/*            if (TidySmartIndent && tidyGetPrev(node) != NULL)
+                tidyPFlushLine(doc, indent);
 */
             PrintSgmlTag(doc, mode ,indent, node, SgmlTagStart);
-            if (ShouldIndent(doc, node))
-                PCondFlushLine(doc, indent);
-            else if (node->tag->model & CM_HTML || 
-                     nodeIsNOFRAMES(node) ||
-                    (node->tag->model & CM_HEAD && !(nodeIsTITLE(node))))
-                PFlushLine(doc, indent);
+            if (tidyShouldIndent(doc, node))
+			{
+                tidyPCondFlushLine(doc, indent);
+			}
+            else if (tidyNodeGetModel(node) & CM_HTML || 
+                     tidyNodeIsNOFRAMES(node) ||
+                    (tidyNodeGetModel(node) & CM_HEAD && !(tidyNodeIsTITLE(node))))
+			{
+                tidyPFlushLine(doc, indent);
+			}
 
-            if (ShouldIndent(doc, node))
-            {   PCondFlushLine(doc, indent);
+            if (tidyShouldIndent(doc, node))
+            {   tidyPCondFlushLine(doc, indent);
                 indent += spaces;
 
-                for (content = node->content;
-                        content != null;
-                        content = content->next)
+                for (content = tidyGetChild(node);
+                        content != NULL;
+                        content = tidyGetNext(content))
+				{
                     PrintSgml(doc, mode, indent, content);
-                PCondFlushLine(doc, indent);
+				}
+                tidyPCondFlushLine(doc, indent);
                 indent -= spaces;
-                PCondFlushLine(doc, indent);
+                tidyPCondFlushLine(doc, indent);
             }
             else
-            {   Node *last;
-                last = null;
-                for (content = node->content;
-                        content != null;
-                        content = content->next) {
+            {   TidyNode last;
+                last = NULL;
+                for (content = tidyGetChild(node);
+                        content != NULL;
+                        content = tidyGetNext(content)) {
                     /* kludge for naked text before block level tag */
-                    if (last && !cfg(doc, TidyIndentContent) && 
-                        last->type == TextNode &&
-                        content->tag && !(content->tag->model & CM_INLINE) )
+                    if (last && !tidyOptGetBool(doc, TidyIndentContent) && 
+                        tidyNodeGetType(last) == TextNode &&
+                        !(tidyNodeGetModel(content) & CM_INLINE) )
                     {
-                        /* PFlushLine(doc, indent); */
-                        PFlushLine(doc, indent);
+                        /* tidyPFlushLine(doc, indent); */
+                        tidyPFlushLine(doc, indent);
                     }
 
                     PrintSgml(doc, mode, 
-                        (ShouldIndent(doc, node) ? indent+spaces : indent), 
+                        (tidyShouldIndent(doc, node) ? indent+spaces : indent), 
                         content);
                     last = content;
                 }
             }
             PrintSgmlTag(doc, mode, indent, node, SgmlTagEnd);
-            PFlushLine(doc, indent);
-            if (cfg(doc, TidyIndentContent) == no &&
-                node->next != null &&
-                TidyHideEndTags == no &&
-                (node->tag->model & (CM_BLOCK|CM_LIST|CM_DEFLIST|CM_TABLE)))
-                PFlushLine(doc, indent);
+            tidyPFlushLine(doc, indent);
+            if (!tidyOptGetBool(doc, TidyIndentContent) &&
+                tidyGetNext(node) != NULL &&
+                !tidyOptGetBool(doc, TidyHideEndTags) &&
+                (tidyNodeGetModel(node) & (CM_BLOCK|CM_LIST|CM_DEFLIST|CM_TABLE)))
+			{
+                tidyPFlushLine(doc, indent);
+			}
         }
     }
 }
+

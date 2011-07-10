@@ -7,7 +7,8 @@
 #include "main.h"
 
 char *progname;
-void usage()
+
+void usage(void)
 {
     printf("Usage: %s [option] <html file>\n", progname);
     printf("Options:\n");
@@ -16,11 +17,9 @@ void usage()
     printf("\t-help\t\tPrint Help Message\n");
 }
 
-int main(int argc, char **argv )
+int main(int argc, char **argv)
 {
     TidyDoc tdoc;
-    TidyDocImpl *doc;
-    StreamOut *out;
     int rc = -1;
     char *file = NULL;
     int i;
@@ -55,30 +54,37 @@ int main(int argc, char **argv )
     }
 
     if(!dbsgml && !dbxml)
-        dbsgml = yes;
-    if(!file) {
+        dbxml = yes;
+    if(!file) 
+	{
         printf("Error: No input file specified\n");
         usage();
         exit(1);
     }
 
-    tdoc = tidyCreate();                     // Initialize "document"
-    tidyOptSetBool( tdoc, TidyXhtmlOut, yes );  // Convert to XHTML
-    rc = tidyParseFile( tdoc, file);
+    tdoc = tidyCreate();                      // Initialize "document"
+    tidyOptSetBool(tdoc, TidyXhtmlOut, yes);  // Convert to XHTML
+    tidyOptSetBool(tdoc, TidyEncloseBlockText, yes);  // see http://wiki.docbook.org/topic/Html2DocBook
+    rc = tidyParseFile(tdoc, file);
 
-    if ( rc >= 0 ) {
-        tidyCleanAndRepair( tdoc ); 
+    if ( rc >= 0 ) 
+	{
+		TidyDocImpl *doc;
+		StreamOut *out;
+
+		tidyCleanAndRepair( tdoc ); 
         tidyRunDiagnostics( tdoc );
         tidyErrorSummary( tdoc );
         tidyGeneralInfo( tdoc );
         
         doc = tidyDocToImpl( tdoc );
-        out = FileOutput(stdout, 0, '\n');
+        out = TY_(FileOutput)( doc, stdout, 0, '\n');
         doc->docOut = out;
-        PrintSgml( doc, 0, 0, doc->root );
-        doc->docOut = null;
+        PrintSgml( tdoc, 0, 0, tidyGetRoot(tdoc) );
+        doc->docOut = NULL;
     }
-    else {
+    else 
+	{
         fprintf(stderr, "Problem parsing file %s\n", file); 
     }
     tidyRelease( tdoc );

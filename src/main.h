@@ -7,8 +7,9 @@ typedef enum {
     SgmlTagStart,
     SgmlTagEnd
 }SgmlTagType;
-void PrintSgml( TidyDocImpl* doc, uint mode, uint indent, Node *node );
+void PrintSgml( TidyDoc doc, uint mode, uint indent, TidyNode node );
 
+#if 0
 /* In tidylib functions */
 extern Bool DescendantOf( Node *element, TidyTagId tid );
 extern void PPrintString( TidyDocImpl* doc, uint indent, ctmbstr str );
@@ -20,5 +21,6 @@ extern void PPrintSection( TidyDocImpl* doc, uint indent, Node *node );
 extern void PPrintPI( TidyDocImpl* doc, uint indent, Node *node );
 extern void PPrintXmlDecl( TidyDocImpl* doc, uint indent, Node *node );
 extern Bool ShouldIndent( TidyDocImpl* doc, Node *node );
+#endif
 
 #endif
